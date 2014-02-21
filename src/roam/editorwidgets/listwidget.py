@@ -1,4 +1,5 @@
-from PyQt4.QtGui import QComboBox
+from PyQt4.QtCore import Qt
+from PyQt4.QtGui import QComboBox, QSortFilterProxyModel, QStandardItemModel, QStandardItem
 
 from qgis.core import QgsMessageLog, QgsMapLayerRegistry, QgsExpression, QgsFeatureRequest
 
@@ -15,16 +16,56 @@ def nullconvert(value):
     return value
 
 
+class ListFilter(QSortFilterProxyModel):
+    """
+    Filter a model to hide the given types of layers
+    """
+    def __init__(self, parent=None):
+        super(ListFilter, self).__init__(parent)
+        self.expression = None
+        self.setDynamicSortFilter(True)
+
+    def setExpressionString(self, expression, layer=None):
+        if expression is None or layer is None:
+            self.expression = None
+            return
+
+        self.expression = QgsExpression(expression)
+        self.expression.prepare(layer.pendingFields())
+
+    def filterAcceptsRow(self, sourcerow, soureparent):
+        if not self.expression:
+            print "No Expression"
+            return True
+
+        index = self.sourceModel().index(sourcerow, 0, soureparent)
+        if not index.isValid():
+            return False
+
+        feature = index.data(ListWidget.FeatureRole)
+        if feature:
+            return self.expression.evaluate(feature)
+        else:
+            return True
+
+
 class ListWidget(EditorWidget):
     widgettype = 'List'
+    DataRole = Qt.UserRole + 1
+    FeatureRole = Qt.UserRole + 2
+
     def __init__(self, *args):
         super(ListWidget, self).__init__(*args)
+        self.itemmodel = QStandardItemModel()
+        self.layerfilter = ListFilter()
 
     def createWidget(self, parent):
         return QComboBox(parent)
 
     def _buildfromlist(self, widget, listconfig):
         items = listconfig['items']
+        self.layerfilter.setExpressionString(None)
+
         for item in items:
             parts = item.split(';')
             data = parts[0]
@@ -33,7 +74,9 @@ class ListWidget(EditorWidget):
             except IndexError:
                 desc = data
 
-            widget.addItem(desc, data)
+            item = QStandardItem(desc)
+            item.setData(data, ListWidget.DataRole)
+            self.itemmodel.appendRow(item)
 
     def _buildfromlayer(self, widget, layerconfig):
         layername = layerconfig['layer']
@@ -54,42 +97,20 @@ class ListWidget(EditorWidget):
             return
 
         if self.allownulls:
-            widget.addItem('(no selection)', None)
+            item = QStandardItem('(no selection)')
+            item.setData(None, ListWidget.DataRole)
+            self.itemmodel.appendRow(item)
 
-        if not filterexp and valuefieldindex == keyfieldindex:
-            values = layer.uniqueValues(keyfieldindex)
-            for value in values:
-                value = nullconvert(value)
-                widget.addItem(value, value)
-            return
-
-        attributes = {keyfieldindex, valuefieldindex}
-        flags = QgsFeatureRequest.NoGeometry
-
-        expression = None
-        if filterexp:
-            expression = QgsExpression(filterexp)
-            expression.prepare(layer.pendingFields())
-            if expression.hasParserError():
-                roam.utils.warning("Expression has parser error: {}".format(expression.parserErrorString()))
-                return
-
-            if expression.needsGeometry():
-                flags = QgsFeatureRequest.NoFlags
-
-            for field in expression.referencedColumns():
-                index = layer.fieldNameIndex(field)
-                attributes.add(index)
-
-        values = set()
-        request = QgsFeatureRequest().setFlags(flags).setSubsetOfAttributes(list(attributes))
-        for feature in layer.getFeatures(request):
-            if expression and not expression.evaluate(feature):
-                continue
-
+        for feature in layer.getFeatures(QgsFeatureRequest()):
             keyvalue = nullconvert(feature[keyfieldindex])
             valuvalue = nullconvert(feature[valuefield])
-            widget.addItem(unicode(keyvalue), unicode(valuvalue))
+            item = QStandardItem(unicode(keyvalue))
+            item.setData(unicode(valuvalue), ListWidget.DataRole)
+            item.setData(feature, ListWidget.FeatureRole)
+            self.itemmodel.appendRow(item)
+
+        if filterexp:
+            self.layerfilter.setExpressionString(filterexp, layer)
 
     def initWidget(self, widget):
         if widget.isEditable():
@@ -99,8 +120,13 @@ class ListWidget(EditorWidget):
         self.charm.activateOn(widget.view())
         widget.currentIndexChanged.connect(self.validate)
 
+        #self.layerfilter.setSourceModel(self.itemmodel)
+        widget.setModel(self.itemmodel)
+
     def updatefromconfig(self):
-        self.widget.clear()
+        print "Update from config"
+        self.itemmodel.clear()
+
         if 'list' in self.config:
             listconfig = self.config['list']
             self._buildfromlist(self.widget, listconfig)
